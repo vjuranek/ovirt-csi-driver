@@ -34,6 +34,13 @@ func (i *IdentityService) GetPluginCapabilities(context.Context, *csi.GetPluginC
 					},
 				},
 			},
+			{
+				Type: &csi.PluginCapability_VolumeExpansion_{
+					VolumeExpansion: &csi.PluginCapability_VolumeExpansion{
+						Type: csi.PluginCapability_VolumeExpansion_ONLINE,
+					},
+				},
+			},
 		},
 	}, nil
 }

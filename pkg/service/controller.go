@@ -1,12 +1,12 @@
 package service
 
 import (
-	"errors"
-	"strconv"
-
+	"fmt"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/ovirt/csi-driver/internal/ovirt"
 	ovirtsdk "github.com/ovirt/go-ovirt"
+	"github.com/pkg/errors"
+	"strconv"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
@@ -30,6 +30,7 @@ type ControllerService struct {
 var ControllerCaps = []csi.ControllerServiceCapability_RPC_Type{
 	csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 	csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME, // attach/detach
+	csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 }
 
 //CreateVolume creates the disk for the request, unattached from any VM
@@ -138,15 +139,12 @@ func (c *ControllerService) ControllerPublishVolume(
 		return nil, err
 	}
 
-	_, err = diskAttachmentByVmAndDisk(conn, req.NodeId, req.VolumeId)
+	da, err := diskAttachmentByVmAndDisk(conn, req.NodeId, req.VolumeId)
 	if err != nil {
-		// If attachment was not found we are good to
-		attachmentNotFoundErr := &AttachmentNotFoundError{}
-		if !errors.As(err, &attachmentNotFoundErr) {
-			klog.Error("Failed to list attachments", err)
-			return nil, err
-		}
-	} else {
+		klog.Error(err)
+		return nil, errors.Wrap(err, "failed finding disk attachments")
+	}
+	if da != nil {
 		klog.Infof("Disk %s is already attached to VM %s, returning OK", req.VolumeId, req.NodeId)
 		return &csi.ControllerPublishVolumeResponse{}, nil
 	}
@@ -182,7 +180,11 @@ func (c *ControllerService) ControllerUnpublishVolume(_ context.Context, req *cs
 
 	attachment, err := diskAttachmentByVmAndDisk(conn, req.NodeId, req.VolumeId)
 	if err != nil {
-		klog.Errorf("Failed to get disk attachment %s for VM %s, returning OK", req.VolumeId, req.NodeId)
+		klog.Error(err)
+		return nil, errors.Wrap(err, "failed finding disk attachments")
+	}
+	if attachment == nil {
+		klog.Info("Disk attachment %s for VM %s already detached, returning OK", req.VolumeId, req.NodeId)
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
 	_, err = conn.SystemService().VmsService().VmService(req.NodeId).
@@ -228,8 +230,66 @@ func (c *ControllerService) ListSnapshots(context.Context, *csi.ListSnapshotsReq
 }
 
 //ControllerExpandVolume
-func (c *ControllerService) ControllerExpandVolume(context.Context, *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
+func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
+	volumeID := req.GetVolumeId()
+	if len(volumeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
+	}
+	capRange := req.GetCapacityRange()
+	if capRange == nil {
+		return nil, status.Error(codes.InvalidArgument, "Capacity range not provided")
+	}
+	newSize := capRange.GetRequiredBytes()
+
+	klog.Infof("Expanding volume %v to %v bytes.", volumeID, newSize)
+	conn, err := c.ovirtClient.GetConnection()
+	if err != nil {
+		msg := fmt.Errorf("failed to get ovirt client connection %w", err)
+		klog.Error(msg)
+		return nil, status.Error(codes.Unavailable, msg.Error())
+	}
+
+	diskAttachment, err := findDiskAttachmentByDiskInCluster(ctx, c.client, conn, volumeID)
+	if err != nil {
+		msg := fmt.Errorf("failed to find disk attachment for volume %s, error %w",
+			req.GetVolumeId, err)
+		klog.Error(msg)
+		return nil, status.Error(codes.Internal, msg.Error())
+	}
+	if diskAttachment == nil {
+		msg := fmt.Sprintf("disk attachment for volume %s was not found on oVirt", req.GetVolumeId())
+		klog.Error(msg)
+		return nil, status.Error(codes.NotFound, msg)
+	}
+	// According to the CSI spec, if the volume is already larger than or equal to the target capacity of
+	// the expansion request, the plugin SHOULD reply 0 OK.
+	disk, err := getDiskFromDiskAttachment(conn, diskAttachment)
+	if err != nil {
+		msg := fmt.Errorf("failed getting disk from attachment %s, error %w", diskAttachment.MustId(), err)
+		klog.Error(msg)
+		return nil, status.Error(codes.Internal, msg.Error())
+	}
+	diskSize := disk.MustTotalSize()
+	if diskSize >= newSize {
+		klog.Infof("Volume %s of size %s is larger than requested size %s, no need to extend",
+			volumeID, newSize)
+		return &csi.ControllerExpandVolumeResponse{
+			CapacityBytes:         diskSize,
+			NodeExpansionRequired: false}, nil
+	}
+	if err = expandDiskByDiskDiskAttachment(ctx, conn, diskAttachment, newSize); err != nil {
+		return nil, status.Errorf(codes.ResourceExhausted, "Failed to expand volume %s: %v", volumeID, err)
+	}
+	klog.Infof("Expanded Disk %v to %v bytes", volumeID, newSize)
+	nodeExpansionRequired := true
+	// If this is a raw block device, no expansion should be necessary on the node
+	cap := req.GetVolumeCapability()
+	if cap != nil && cap.GetBlock() != nil {
+		nodeExpansionRequired = false
+	}
+	return &csi.ControllerExpandVolumeResponse{
+		CapacityBytes:         newSize,
+		NodeExpansionRequired: nodeExpansionRequired}, nil
 }
 
 //ControllerGetCapabilities
