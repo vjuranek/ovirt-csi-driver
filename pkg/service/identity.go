@@ -12,7 +12,7 @@ import (
 
 //IdentityService of ovirt-csi-driver
 type IdentityService struct {
-	ovirtClient ovirt.Client
+	ovirtClient *ovirt.Client
 }
 
 //GetPluginInfo returns the vendor name and version - set in build time
@@ -39,17 +39,11 @@ func (i *IdentityService) GetPluginCapabilities(context.Context, *csi.GetPluginC
 }
 
 // Probe checks the state of the connection to ovirt-engine
-func (i *IdentityService) Probe(ctx context.Context, request *csi.ProbeRequest) (*csi.ProbeResponse, error) {
-	c, err := i.ovirtClient.GetConnection()
+func (i *IdentityService) Probe(_ context.Context, _ *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	_, err := i.ovirtClient.GetConnection()
 	if err != nil {
 		klog.Errorf("Could not get connection %v", err)
 		return nil, status.Error(codes.FailedPrecondition, "Could not get connection to ovirt-engine")
 	}
-
-	if err := c.Test(); err != nil {
-		klog.Errorf("Connection test failed %v", err)
-		return nil, status.Error(codes.FailedPrecondition, "Could not get connection to ovirt-engine")
-	}
-
 	return &csi.ProbeResponse{Ready: &wrappers.BoolValue{Value: true}}, nil
 }
