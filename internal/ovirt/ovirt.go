@@ -49,7 +49,6 @@ func (o *Client) GetConnection() (*ovirtsdk.Connection, error) {
 	if o.connection == nil || o.connection.Test() != nil {
 		return newOvirtConnection()
 	}
-
 	return o.connection, nil
 }
 
