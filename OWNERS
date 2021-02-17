@@ -1,8 +1,10 @@
 approvers:
   - rgolangh
   - bennyz
+  - Gal-Zaidman
 reviewers:
   - rgolangh
   - bennyz
+  - Gal-Zaidman
 component: "Storage"
 subcomponent: "oVirt CSI Driver"
