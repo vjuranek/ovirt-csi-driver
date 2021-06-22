@@ -89,6 +89,8 @@ Kubernetes:
   
 # Development
 
+To test your modified CSI driver on a test cluster follow [Docs](docs/testing-custom-driver.md)
+ 
 # Deploy
   - operator
   - dev/test
