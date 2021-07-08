@@ -1,4 +1,4 @@
-FROM registry.ci.openshift.org/openshift/release:golang-1.13 AS builder
+FROM registry.ci.openshift.org/openshift/release:golang-1.16 AS builder
 
 WORKDIR /src/ovirt-csi-driver
 COPY . .
