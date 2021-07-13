@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
+	configv1 "github.com/openshift/api/config/v1"
 	"math/rand"
 	"os"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"time"
 
 	"github.com/ovirt/csi-driver/internal/ovirt"
@@ -62,7 +65,16 @@ func handle() {
 	if err != nil {
 		klog.Fatal(err)
 	}
-
+	if err := configv1.Install(mgr.GetScheme()); err != nil {
+		klog.Fatal(err)
+	}
+	go func() {
+		if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
+			klog.Fatal(err)
+		} else {
+			klog.Info("Manager stopped gracefully.")
+		}
+	}()
 	// get the node object by name and pass the VM ID because it is the node
 	// id from the storage perspective. It will be used for attaching disks
 	var nodeId string
@@ -72,7 +84,7 @@ func handle() {
 	}
 
 	if *nodeName != "" {
-		get, err := clientSet.CoreV1().Nodes().Get(*nodeName, metav1.GetOptions{})
+		get, err := clientSet.CoreV1().Nodes().Get(context.Background(), *nodeName, metav1.GetOptions{})
 		if err != nil {
 			klog.Fatal(err)
 		}

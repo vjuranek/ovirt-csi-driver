@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/ovirt/csi-driver/internal/ovirt"
 	ovirtsdk "github.com/ovirt/go-ovirt"
+
 	"golang.org/x/net/context"
 	"k8s.io/klog"
 )
@@ -27,6 +29,7 @@ type NodeService struct {
 
 var NodeCaps = []csi.NodeServiceCapability_RPC_Type{
 	csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
+	csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
 }
 
 func baseDevicePathByInterface(diskInterface ovirtsdk.DiskInterface) (string, error) {
@@ -160,8 +163,40 @@ func (n *NodeService) NodeGetVolumeStats(context.Context, *csi.NodeGetVolumeStat
 	panic("implement me")
 }
 
-func (n *NodeService) NodeExpandVolume(context.Context, *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
-	panic("implement me")
+func (n *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
+	volumePath := req.GetVolumePath()
+	if len(volumePath) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "volume path must be provided")
+	}
+	volumeCapability := req.GetVolumeCapability()
+	if len(volumePath) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "volume capability must be provided")
+	}
+	var resizeCmd string
+	fsType := volumeCapability.GetMount().FsType
+	if strings.HasPrefix(fsType, "ext") {
+		resizeCmd = "resize2fs"
+	} else if strings.HasPrefix(fsType, "xfs") {
+		resizeCmd = "xfs_growfs"
+	} else {
+		return nil, status.Error(codes.InvalidArgument, "fsType is neither xfs or ext[234]")
+	}
+	klog.Infof("Resizing filesystem %s mounted on %s with %s", fsType, volumePath, resizeCmd)
+
+	device, err := getDeviceByMountPoint(volumePath)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command(resizeCmd, device)
+	err = cmd.Run()
+	var exitError *exec.ExitError
+	if err != nil && errors.As(err, &exitError) {
+		return nil, status.Error(codes.Internal, err.Error()+" resize failed with "+exitError.Error())
+	}
+
+	klog.Infof("Resized %s filesystem on device %s)", fsType, device)
+	return &csi.NodeExpandVolumeResponse{}, nil
 }
 
 func (n *NodeService) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
@@ -188,7 +223,10 @@ func (n *NodeService) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilit
 func getDeviceByAttachmentId(volumeID, nodeID string, conn *ovirtsdk.Connection) (string, error) {
 	attachment, err := diskAttachmentByVmAndDisk(conn, nodeID, volumeID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed finding disk attachments, error: %w", err)
+	}
+	if attachment == nil {
+		return "", fmt.Errorf("attachment wasn't found for VM %s, error %w", nodeID)
 	}
 
 	klog.Infof("Extracting pvc volume name %s", volumeID)
@@ -288,4 +326,17 @@ func isMountpoint(mountDir string) bool {
 		return false
 	}
 	return true
+}
+
+func getDeviceByMountPoint(mp string) (string, error) {
+	out, err := exec.Command("findmnt", "-nfc", mp).Output()
+	if err != nil {
+		return "", fmt.Errorf("error: %v\n", err)
+	}
+
+	s := strings.Fields(string(out))
+	if len(s) < 2 {
+		return "", fmt.Errorf("could not parse command output: >%s<", string(out))
+	}
+	return s[1], nil
 }
