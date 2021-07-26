@@ -86,13 +86,20 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		provisionedSize = minimumDiskSize
 	}
 
+	imageFormat, err := handleCreateVolumeImageFormat(conn, storageDomain, thinProvisioning)
+	if err != nil {
+		msg := fmt.Errorf("error while choosing image format, error is %w", err)
+		klog.Errorf(msg.Error())
+		return nil, msg
+	}
+
 	// creating the disk
 	disk, err = ovirtsdk.NewDiskBuilder().
 		Name(diskName).
 		StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
 		ProvisionedSize(provisionedSize).
 		ReadOnly(false).
-		Format(ovirtsdk.DISKFORMAT_COW).
+		Format(imageFormat).
 		Sparse(thinProvisioning).
 		Build()
 
@@ -116,6 +123,37 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 			VolumeId:      createDisk.MustDisk().MustId(),
 		},
 	}, nil
+}
+
+func handleCreateVolumeImageFormat(conn *ovirtsdk.Connection, storageDomainName string, thinProvisioning bool) (ovirtsdk.DiskFormat, error) {
+	sd, err := getStorageDomainByName(conn, storageDomainName)
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed searching for storage domain with name %s, error: %w", storageDomainName, err)
+	}
+	if sd == nil {
+		return "", fmt.Errorf(
+			"storage domain with name %s wasn't found", storageDomainName)
+	}
+	storage, ok := sd.Storage()
+	if !ok {
+		return "", fmt.Errorf(
+			"storage domain with name %s didn't have host storage, veify it is connected to a host",
+			storageDomainName)
+	}
+	storageType, ok := storage.Type()
+	if !ok {
+		return "", fmt.Errorf(
+			"storage domain with name %s didn't have a storage type, please check storage domain on ovirt engine",
+			storageDomainName)
+	}
+	// Use COW diskformat only when thin provisioning is requested and storage domain
+	// is a non file storage type (for example ISCSI)
+	if !isFileDomain(storageType) && thinProvisioning {
+		return ovirtsdk.DISKFORMAT_COW, nil
+	} else {
+		return ovirtsdk.DISKFORMAT_RAW, nil
+	}
 }
 
 //DeleteVolume removed the disk from oVirt

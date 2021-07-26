@@ -145,6 +145,26 @@ func getDiskByName(conn *ovirtsdk.Connection, diskName string) (*ovirtsdk.Disk, 
 	return disks.Slice()[0], nil
 }
 
+func getStorageDomainByName(conn *ovirtsdk.Connection, storageDomainName string) (*ovirtsdk.StorageDomain, error) {
+	sdByName, err := conn.SystemService().StorageDomainsService().List().Search(storageDomainName).Send()
+	if err != nil {
+		return nil, err
+	}
+	sd, ok := sdByName.StorageDomains()
+	if !ok {
+		return nil, fmt.Errorf(
+			"error, failed searching for storage domain with name %s", storageDomainName)
+	}
+	if len(sd.Slice()) > 1 {
+		return nil, fmt.Errorf(
+			"error, found more then one storage domain with the name %s, please use ID instead", storageDomainName)
+	}
+	if len(sd.Slice()) == 0 {
+		return nil, nil
+	}
+	return sd.Slice()[0], nil
+}
+
 func waitForDiskStatusOk(ctx context.Context, conn *ovirtsdk.Connection, diskID string) error {
 	var lastStatus ovirtsdk.DiskStatus
 	diskService := conn.SystemService().DisksService().DiskService(diskID)
@@ -196,5 +216,14 @@ func checkJobFinished(ctx context.Context, conn *ovirtsdk.Connection, correlatio
 			return false, fmt.Errorf(
 				"timeout while waiting for job with correlation_id %s to finish, error %w", correlationID, ctx.Err())
 		}
+	}
+}
+
+func isFileDomain(storageType ovirtsdk.StorageType) bool {
+	switch storageType {
+	case ovirtsdk.STORAGETYPE_NFS, ovirtsdk.STORAGETYPE_GLUSTERFS, ovirtsdk.STORAGETYPE_POSIXFS, ovirtsdk.STORAGETYPE_LOCALFS:
+		return true
+	default:
+		return false
 	}
 }
