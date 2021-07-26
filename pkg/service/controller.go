@@ -102,20 +102,25 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		Format(imageFormat).
 		Sparse(thinProvisioning).
 		Build()
-
 	if err != nil {
 		// failed to construct the disk
-		return nil, err
+		return nil, fmt.Errorf("failed building disk resource, error is %w", err)
 	}
-
 	createDisk, err := conn.SystemService().DisksService().
 		Add().
 		Disk(disk).
 		Send()
 	if err != nil {
-		// failed to create the disk
-		klog.Errorf("Failed creating disk %s", diskName)
-		return nil, err
+		msg := fmt.Errorf("failed creating disk %s error is %w", diskName, err)
+		klog.Errorf(msg.Error())
+		return nil, msg
+	}
+
+	if err = waitForDiskStatusOk(ctx, conn, createDisk.MustDisk().MustId()); err != nil {
+		msg := fmt.Errorf("failed waiting for disk %s to be created, error: %w",
+			createDisk.MustDisk().MustId(), err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
