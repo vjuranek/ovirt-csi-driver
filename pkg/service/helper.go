@@ -125,6 +125,26 @@ func getDiskFromDiskAttachment(conn *ovirtsdk.Connection, diskAttachment *ovirts
 	return d, nil
 }
 
+func getDiskByName(conn *ovirtsdk.Connection, diskName string) (*ovirtsdk.Disk, error) {
+	diskByName, err := conn.SystemService().DisksService().List().Search(diskName).Send()
+	if err != nil {
+		return nil, err
+	}
+	disks, ok := diskByName.Disks()
+	if !ok {
+		return nil, fmt.Errorf(
+			"error, failed searching for disk with name %s", diskName)
+	}
+	if len(disks.Slice()) > 1 {
+		return nil, fmt.Errorf(
+			"error, found more then one disk with the name %s, please use ID instead", diskName)
+	}
+	if len(disks.Slice()) == 0 {
+		return nil, nil
+	}
+	return disks.Slice()[0], nil
+}
+
 func waitForDiskStatusOk(ctx context.Context, conn *ovirtsdk.Connection, diskID string) error {
 	var lastStatus ovirtsdk.DiskStatus
 	diskService := conn.SystemService().DisksService().DiskService(diskID)

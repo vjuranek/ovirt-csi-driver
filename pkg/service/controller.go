@@ -36,6 +36,25 @@ var ControllerCaps = []csi.ControllerServiceCapability_RPC_Type{
 //CreateVolume creates the disk for the request, unattached from any VM
 func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	klog.Infof("Creating disk %s", req.Name)
+	storageDomain := req.Parameters[ParameterStorageDomainName]
+	if len(storageDomain) == 0 {
+		return nil, fmt.Errorf("error required storageClass paramater %s wasn't set",
+			ParameterStorageDomainName)
+	}
+	diskName := req.Name
+	if len(diskName) == 0 {
+		return nil, fmt.Errorf("error required request parameter Name was not provided")
+	}
+	thinProvisioning, err := strconv.ParseBool(req.Parameters[ParameterThinProvisioning])
+	if req.Parameters[ParameterThinProvisioning] == "" {
+		// In case thin provisioning is not set, we default to true
+		thinProvisioning = true
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to parse storage class field %s, expected 'true' or 'fasle' but got %s",
+			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
+	}
 	// idempotence first - see if disk already exists, ovirt creates disk by name(alias in ovirt as well)
 	conn, err := c.ovirtClient.GetConnection()
 	if err != nil {
@@ -43,14 +62,14 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, err
 	}
 
-	diskByName, err := conn.SystemService().DisksService().List().Search(req.Name).Send()
+	disk, err := getDiskByName(conn, diskName)
 	if err != nil {
-		return nil, err
+		msg := fmt.Errorf("failed finding disk %s by name, error: %w", diskName, err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
-
 	// if exists we're done
-	if disks, ok := diskByName.Disks(); ok && len(disks.Slice()) == 1 {
-		disk := disks.Slice()[0]
+	if disk != nil {
 		return &csi.CreateVolumeResponse{
 			Volume: &csi.Volume{
 				CapacityBytes:      disk.MustProvisionedSize(),
@@ -62,26 +81,15 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		}, nil
 	}
 
-	thinProvisioning, err := strconv.ParseBool(req.Parameters[ParameterThinProvisioning])
-	if req.Parameters[ParameterThinProvisioning] == "" {
-		// In case thin provisioning is not set, we default to true
-		thinProvisioning = true
-	}
-	if err != nil {
-		return nil, fmt.Errorf(
-			"failed to parse storage class field %s, expected 'true' or 'fasle' but got %s",
-			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
-	}
-
 	provisionedSize := req.CapacityRange.GetRequiredBytes()
 	if provisionedSize < minimumDiskSize {
 		provisionedSize = minimumDiskSize
 	}
 
 	// creating the disk
-	disk, err := ovirtsdk.NewDiskBuilder().
-		Name(req.Name).
-		StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(req.Parameters[ParameterStorageDomainName])).
+	disk, err = ovirtsdk.NewDiskBuilder().
+		Name(diskName).
+		StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
 		ProvisionedSize(provisionedSize).
 		ReadOnly(false).
 		Format(ovirtsdk.DISKFORMAT_COW).
@@ -99,7 +107,7 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		Send()
 	if err != nil {
 		// failed to create the disk
-		klog.Errorf("Failed creating disk %s", req.Name)
+		klog.Errorf("Failed creating disk %s", diskName)
 		return nil, err
 	}
 	return &csi.CreateVolumeResponse{
