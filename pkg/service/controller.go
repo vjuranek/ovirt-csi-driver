@@ -6,6 +6,7 @@ import (
 	"github.com/ovirt/csi-driver/internal/ovirt"
 	ovirtsdk "github.com/ovirt/go-ovirt"
 	"github.com/pkg/errors"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"strconv"
 
 	"golang.org/x/net/context"
@@ -52,7 +53,7 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
-			"failed to parse storage class field %s, expected 'true' or 'fasle' but got %s",
+			"failed to parse storage class field %s, expected 'true' or 'false' but got %s",
 			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
 	}
 	// idempotence first - see if disk already exists, ovirt creates disk by name(alias in ovirt as well)
@@ -68,64 +69,69 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		klog.Errorf(msg.Error())
 		return nil, msg
 	}
-	// if exists we're done
-	if disk != nil {
-		return &csi.CreateVolumeResponse{
-			Volume: &csi.Volume{
-				CapacityBytes:      disk.MustProvisionedSize(),
-				VolumeId:           disk.MustId(),
-				VolumeContext:      nil,
-				ContentSource:      nil,
-				AccessibleTopology: nil,
-			},
-		}, nil
-	}
+	// if disk doesn't already exist then create it
+	if disk == nil {
+		provisionedSize := req.CapacityRange.GetRequiredBytes()
+		if provisionedSize < minimumDiskSize {
+			provisionedSize = minimumDiskSize
+		}
 
-	provisionedSize := req.CapacityRange.GetRequiredBytes()
-	if provisionedSize < minimumDiskSize {
-		provisionedSize = minimumDiskSize
-	}
+		imageFormat, err := handleCreateVolumeImageFormat(conn, storageDomain, thinProvisioning)
+		if err != nil {
+			msg := fmt.Errorf("error while choosing image format, error is %w", err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
 
-	imageFormat, err := handleCreateVolumeImageFormat(conn, storageDomain, thinProvisioning)
-	if err != nil {
-		msg := fmt.Errorf("error while choosing image format, error is %w", err)
-		klog.Errorf(msg.Error())
-		return nil, msg
+		// creating the disk
+		disk, err = ovirtsdk.NewDiskBuilder().
+			Name(diskName).
+			StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
+			ProvisionedSize(provisionedSize).
+			ReadOnly(false).
+			Format(imageFormat).
+			Sparse(thinProvisioning).
+			Build()
+		if err != nil {
+			// failed to construct the disk
+			return nil, fmt.Errorf("failed building disk resource, error is %w", err)
+		}
+		correlationID := fmt.Sprintf("create_disk_%s", utilrand.String(5))
+		createDisk, err := conn.SystemService().DisksService().
+			Add().
+			Disk(disk).
+			Query("correlation_id", correlationID).
+			Send()
+		if err != nil {
+			msg := fmt.Errorf("failed creating disk %s error is %w", diskName, err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
+		disk = createDisk.MustDisk()
+		finished, err := checkJobFinished(ctx, conn, correlationID)
+		if err != nil {
+			msg := fmt.Errorf("error while waiting for disk %s create job to finish, error: %w",
+				disk.MustId(), err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
+		if !finished {
+			msg := fmt.Errorf("create disk %s job didn't finish, error: %w", disk.MustId(), err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
 	}
-
-	// creating the disk
-	disk, err = ovirtsdk.NewDiskBuilder().
-		Name(diskName).
-		StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
-		ProvisionedSize(provisionedSize).
-		ReadOnly(false).
-		Format(imageFormat).
-		Sparse(thinProvisioning).
-		Build()
-	if err != nil {
-		// failed to construct the disk
-		return nil, fmt.Errorf("failed building disk resource, error is %w", err)
-	}
-	createDisk, err := conn.SystemService().DisksService().
-		Add().
-		Disk(disk).
-		Send()
-	if err != nil {
-		msg := fmt.Errorf("failed creating disk %s error is %w", diskName, err)
-		klog.Errorf(msg.Error())
-		return nil, msg
-	}
-
-	if err = waitForDiskStatusOk(ctx, conn, createDisk.MustDisk().MustId()); err != nil {
+	if err = waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
 		msg := fmt.Errorf("failed waiting for disk %s to be created, error: %w",
-			createDisk.MustDisk().MustId(), err)
+			disk.MustId(), err)
 		klog.Errorf(msg.Error())
 		return nil, msg
 	}
+	klog.Infof("Finished creating disk %s", diskName)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			CapacityBytes: createDisk.MustDisk().MustProvisionedSize(),
-			VolumeId:      createDisk.MustDisk().MustId(),
+			CapacityBytes: disk.MustProvisionedSize(),
+			VolumeId:      disk.MustId(),
 		},
 	}, nil
 }
@@ -143,7 +149,7 @@ func handleCreateVolumeImageFormat(conn *ovirtsdk.Connection, storageDomainName 
 	storage, ok := sd.Storage()
 	if !ok {
 		return "", fmt.Errorf(
-			"storage domain with name %s didn't have host storage, veify it is connected to a host",
+			"storage domain with name %s didn't have host storage, verify it is connected to a host",
 			storageDomainName)
 	}
 	storageType, ok := storage.Type()
