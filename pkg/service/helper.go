@@ -47,26 +47,40 @@ func findDiskAttachmentByDiskInVMs(conn *ovirtsdk.Connection, diskId string, vms
 }
 
 func findDiskAttachmentByDiskInCluster(ctx context.Context, c client.Client, conn *ovirtsdk.Connection, diskId string) (*ovirtsdk.DiskAttachment, error) {
+	var vms []*ovirtsdk.Vm
+	searchTerm := ""
 	tag, err := getClusterTag(ctx, c)
-	if err != nil {
-		klog.Error(err)
-		return nil, errors.Wrap(err, "failed finding openshift cluster tag")
+	if err == nil {
+		searchTerm = fmt.Sprintf("tag=%s", tag)
 	}
-	vms, err := getVmsWithTag(conn, tag)
+	vms, err = getVms(conn, searchTerm)
 	if err != nil {
 		klog.Error(err)
 		return nil, errors.Wrap(err, "failed searching VMs")
 	}
+	if len(vms) == 0 {
+		klog.Error(err)
+		return nil, errors.New("Didn't found any vms in engine")
+	}
 	return findDiskAttachmentByDiskInVMs(conn, diskId, vms)
 }
 
-func getVmsWithTag(connection *ovirtsdk.Connection, tag string) ([]*ovirtsdk.Vm, error) {
-	searchTerm := fmt.Sprintf("tag=%s", tag)
-	vmsWithTag, err := connection.SystemService().VmsService().List().Search(searchTerm).Send()
-	if err != nil {
-		return nil, fmt.Errorf("faild listing VMs with tag %s, error: %w", tag, err)
+// getVms return a list of VMs available on the oVirt engine.
+// searchTerm is an optional search term in the oVirt engine, much by a valid search term for example `tag=example`
+func getVms(connection *ovirtsdk.Connection, searchTerm string) ([]*ovirtsdk.Vm, error) {
+	vmsListRequest := connection.SystemService().VmsService().List()
+	if searchTerm != "" {
+		vmsListRequest = vmsListRequest.Search(searchTerm)
 	}
-	return vmsWithTag.MustVms().Slice(), nil
+	vmsResp, err := vmsListRequest.Send()
+	if err != nil {
+		return nil, fmt.Errorf("failed listing VMs, error: %w", err)
+	}
+	vms, ok := vmsResp.Vms()
+	if !ok {
+		return nil, errors.New("failed getting VMs from request")
+	}
+	return vms.Slice(), nil
 }
 
 func getClusterTag(ctx context.Context, c client.Client) (string, error) {
@@ -78,37 +92,32 @@ func getClusterTag(ctx context.Context, c client.Client) (string, error) {
 	return infra.Status.InfrastructureName, nil
 }
 
-func expandDiskByDiskDiskAttachment(ctx context.Context, conn *ovirtsdk.Connection, diskAttachment *ovirtsdk.DiskAttachment, bytes int64) error {
-	correlationID := fmt.Sprintf("image_transfer_%s", utilrand.String(5))
+func expandDisk(ctx context.Context, conn *ovirtsdk.Connection, disk *ovirtsdk.Disk, bytes int64) error {
+	correlationID := fmt.Sprintf("disk_resize_%s", utilrand.String(5))
 
-	disk, err := getDiskFromDiskAttachment(conn, diskAttachment)
-	if err != nil {
-		return fmt.Errorf("failed to expand disk attachment %s, error: %w", diskAttachment.MustId(), err)
-	}
 	// Check That the disk is ready for expansion
-	if err = waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
-		return fmt.Errorf("failed to expand disk attachment %s, error: %w", diskAttachment.MustId(), err)
+	if err := waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
+		return fmt.Errorf("failed to expand disk attachment %s, error: %w", disk.MustId(), err)
 	}
-
-	diskAttachment.MustDisk().SetProvisionedSize(bytes)
-	_, err = conn.SystemService().VmsService().VmService(diskAttachment.MustVm().MustId()).
-		DiskAttachmentsService().AttachmentService(diskAttachment.MustId()).
-		Update().DiskAttachment(diskAttachment).
+	disk.SetProvisionedSize(bytes)
+	_, err := conn.SystemService().DisksService().DiskService(disk.MustId()).
+		Update().Disk(disk).
 		Query("correlation_id", correlationID).
 		Send()
 	if err != nil {
-		return fmt.Errorf("failed to expand disk attachment %s, error: %w", diskAttachment.MustId(), err)
+		return fmt.Errorf("failed to expand disk %s, error: %w", disk.MustId(), err)
 	}
+
 	finished, err := checkJobFinished(ctx, conn, correlationID)
 	if err != nil {
-		return fmt.Errorf("failed to expand disk attachment %s, error: %w", diskAttachment.MustId(), err)
+		return fmt.Errorf("failed to expand disk %s, error: %w", disk.MustId(), err)
 	}
 	if !finished {
-		return fmt.Errorf("expand disk attachment %s expansion job didn't finish, error: %w",
-			diskAttachment.MustId(), err)
+		return fmt.Errorf("expand disk %s expansion job didn't finish, error: %w",
+			disk.MustId(), err)
 	}
 	if err = waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
-		return fmt.Errorf("failed to expand disk attachment %s, error: %w", diskAttachment.MustId(), err)
+		return fmt.Errorf("failed to expand disk %s, error: %w", disk.MustId(), err)
 	}
 	return nil
 }
