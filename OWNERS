@@ -1,9 +1,9 @@
 approvers:
-  - rgolangh
+  - janosdebugs
   - bennyz
   - Gal-Zaidman
 reviewers:
-  - rgolangh
+  - janosdebugs
   - bennyz
   - Gal-Zaidman
 component: "Storage"
