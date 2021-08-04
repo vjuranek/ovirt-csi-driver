@@ -6,6 +6,7 @@ import (
 	"github.com/ovirt/csi-driver/internal/ovirt"
 	ovirtsdk "github.com/ovirt/go-ovirt"
 	"github.com/pkg/errors"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"strconv"
 
 	"golang.org/x/net/context"
@@ -36,6 +37,25 @@ var ControllerCaps = []csi.ControllerServiceCapability_RPC_Type{
 //CreateVolume creates the disk for the request, unattached from any VM
 func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	klog.Infof("Creating disk %s", req.Name)
+	storageDomain := req.Parameters[ParameterStorageDomainName]
+	if len(storageDomain) == 0 {
+		return nil, fmt.Errorf("error required storageClass paramater %s wasn't set",
+			ParameterStorageDomainName)
+	}
+	diskName := req.Name
+	if len(diskName) == 0 {
+		return nil, fmt.Errorf("error required request parameter Name was not provided")
+	}
+	thinProvisioning, err := strconv.ParseBool(req.Parameters[ParameterThinProvisioning])
+	if req.Parameters[ParameterThinProvisioning] == "" {
+		// In case thin provisioning is not set, we default to true
+		thinProvisioning = true
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to parse storage class field %s, expected 'true' or 'false' but got %s",
+			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
+	}
 	// idempotence first - see if disk already exists, ovirt creates disk by name(alias in ovirt as well)
 	conn, err := c.ovirtClient.GetConnection()
 	if err != nil {
@@ -43,63 +63,108 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, err
 	}
 
-	diskByName, err := conn.SystemService().DisksService().List().Search(req.Name).Send()
+	disk, err := getDiskByName(conn, diskName)
 	if err != nil {
-		return nil, err
+		msg := fmt.Errorf("failed finding disk %s by name, error: %w", diskName, err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
+	// if disk doesn't already exist then create it
+	if disk == nil {
+		provisionedSize := req.CapacityRange.GetRequiredBytes()
+		if provisionedSize < minimumDiskSize {
+			provisionedSize = minimumDiskSize
+		}
 
-	// if exists we're done
-	if disks, ok := diskByName.Disks(); ok && len(disks.Slice()) == 1 {
-		disk := disks.Slice()[0]
-		return &csi.CreateVolumeResponse{
-			Volume: &csi.Volume{
-				CapacityBytes:      disk.MustProvisionedSize(),
-				VolumeId:           disk.MustId(),
-				VolumeContext:      nil,
-				ContentSource:      nil,
-				AccessibleTopology: nil,
-			},
-		}, nil
+		imageFormat, err := handleCreateVolumeImageFormat(conn, storageDomain, thinProvisioning)
+		if err != nil {
+			msg := fmt.Errorf("error while choosing image format, error is %w", err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
+
+		// creating the disk
+		disk, err = ovirtsdk.NewDiskBuilder().
+			Name(diskName).
+			StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
+			ProvisionedSize(provisionedSize).
+			ReadOnly(false).
+			Format(imageFormat).
+			Sparse(thinProvisioning).
+			Build()
+		if err != nil {
+			// failed to construct the disk
+			return nil, fmt.Errorf("failed building disk resource, error is %w", err)
+		}
+		correlationID := fmt.Sprintf("create_disk_%s", utilrand.String(5))
+		createDisk, err := conn.SystemService().DisksService().
+			Add().
+			Disk(disk).
+			Query("correlation_id", correlationID).
+			Send()
+		if err != nil {
+			msg := fmt.Errorf("failed creating disk %s error is %w", diskName, err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
+		disk = createDisk.MustDisk()
+		finished, err := checkJobFinished(ctx, conn, correlationID)
+		if err != nil {
+			msg := fmt.Errorf("error while waiting for disk %s create job to finish, error: %w",
+				disk.MustId(), err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
+		if !finished {
+			msg := fmt.Errorf("create disk %s job didn't finish, error: %w", disk.MustId(), err)
+			klog.Errorf(msg.Error())
+			return nil, msg
+		}
 	}
-
-	// TODO rgolan the default in case of error would be non thin - change it?
-	thinProvisioning, _ := strconv.ParseBool(req.Parameters[ParameterThinProvisioning])
-
-	provisionedSize := req.CapacityRange.GetRequiredBytes()
-	if provisionedSize < minimumDiskSize {
-		provisionedSize = minimumDiskSize
+	if err = waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
+		msg := fmt.Errorf("failed waiting for disk %s to be created, error: %w",
+			disk.MustId(), err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
-
-	// creating the disk
-	disk, err := ovirtsdk.NewDiskBuilder().
-		Name(req.Name).
-		StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(req.Parameters[ParameterStorageDomainName])).
-		ProvisionedSize(provisionedSize).
-		ReadOnly(false).
-		Format(ovirtsdk.DISKFORMAT_COW).
-		Sparse(thinProvisioning).
-		Build()
-
-	if err != nil {
-		// failed to construct the disk
-		return nil, err
-	}
-
-	createDisk, err := conn.SystemService().DisksService().
-		Add().
-		Disk(disk).
-		Send()
-	if err != nil {
-		// failed to create the disk
-		klog.Errorf("Failed creating disk %s", req.Name)
-		return nil, err
-	}
+	klog.Infof("Finished creating disk %s", diskName)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			CapacityBytes: createDisk.MustDisk().MustProvisionedSize(),
-			VolumeId:      createDisk.MustDisk().MustId(),
+			CapacityBytes: disk.MustProvisionedSize(),
+			VolumeId:      disk.MustId(),
 		},
 	}, nil
+}
+
+func handleCreateVolumeImageFormat(conn *ovirtsdk.Connection, storageDomainName string, thinProvisioning bool) (ovirtsdk.DiskFormat, error) {
+	sd, err := getStorageDomainByName(conn, storageDomainName)
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed searching for storage domain with name %s, error: %w", storageDomainName, err)
+	}
+	if sd == nil {
+		return "", fmt.Errorf(
+			"storage domain with name %s wasn't found", storageDomainName)
+	}
+	storage, ok := sd.Storage()
+	if !ok {
+		return "", fmt.Errorf(
+			"storage domain with name %s didn't have host storage, verify it is connected to a host",
+			storageDomainName)
+	}
+	storageType, ok := storage.Type()
+	if !ok {
+		return "", fmt.Errorf(
+			"storage domain with name %s didn't have a storage type, please check storage domain on ovirt engine",
+			storageDomainName)
+	}
+	// Use COW diskformat only when thin provisioning is requested and storage domain
+	// is a non file storage type (for example ISCSI)
+	if !isFileDomain(storageType) && thinProvisioning {
+		return ovirtsdk.DISKFORMAT_COW, nil
+	} else {
+		return ovirtsdk.DISKFORMAT_RAW, nil
+	}
 }
 
 //DeleteVolume removed the disk from oVirt
