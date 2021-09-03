@@ -19,6 +19,7 @@ import (
 	ovirtsdk "github.com/ovirt/go-ovirt"
 
 	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 	"k8s.io/klog"
 )
 
@@ -339,4 +340,14 @@ func getDeviceByMountPoint(mp string) (string, error) {
 		return "", fmt.Errorf("could not parse command output: >%s<", string(out))
 	}
 	return s[1], nil
+}
+
+func IsBlockDevice(fullPath string) (bool, error) {
+	st := &unix.Stat_t{}
+	err := unix.Stat(fullPath, st)
+	if err != nil {
+		return false, err
+	}
+
+	return (st.Mode & unix.S_IFMT) == unix.S_IFBLK, nil
 }
