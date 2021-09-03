@@ -343,6 +343,31 @@ func getDeviceByMountPoint(mp string) (string, error) {
 	return s[1], nil
 }
 
+func StatFS(path string) (available, capacity, used, inodesFree, inodes, inodesUsed int64, err error) {
+	statfs := &unix.Statfs_t{}
+	err = unix.Statfs(path, statfs)
+	if err != nil {
+		err = fmt.Errorf("Failed to get fs info on path %s: %v", path, err)
+		return
+	}
+
+	// Available is blocks available * fragment size
+	available = int64(statfs.Bavail) * int64(statfs.Bsize)
+
+	// Capacity is total block count * fragment size
+	capacity = int64(statfs.Blocks) * int64(statfs.Bsize)
+
+	// Usage is block being used * fragment size (aka block size).
+	used = (int64(statfs.Blocks) - int64(statfs.Bfree)) * int64(statfs.Bsize)
+
+	// Get inode usage
+	inodes = int64(statfs.Files)
+	inodesFree = int64(statfs.Ffree)
+	inodesUsed = inodes - inodesFree
+
+	return
+}
+
 func IsBlockDevice(fullPath string) (bool, error) {
 	st := &unix.Stat_t{}
 	err := unix.Stat(fullPath, st)
