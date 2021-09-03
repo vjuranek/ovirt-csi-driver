@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -350,4 +351,22 @@ func IsBlockDevice(fullPath string) (bool, error) {
 	}
 
 	return (st.Mode & unix.S_IFMT) == unix.S_IFBLK, nil
+}
+
+func getBlockSizeBytes(devicePath string) (int64, error) {
+	cmd := exec.Command("blockdev", "--getsize64", devicePath)
+	out, err := cmd.Output()
+
+	if err != nil {
+		return -1, fmt.Errorf("Error when getting size of block volume at path %s: output: %s, err: %v", devicePath, string(out), err)
+	}
+
+	strOut := strings.TrimSpace(string(out))
+	gotSizeBytes, err := strconv.ParseInt(strOut, 10, 64)
+
+	if err != nil {
+		return -1, fmt.Errorf("Failed to parse %s into an int size", strOut)
+	}
+
+	return gotSizeBytes, nil
 }
