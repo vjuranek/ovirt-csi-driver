@@ -16,6 +16,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/ovirt/csi-driver/internal/ovirt"
+	volumemanager "github.com/ovirt/csi-driver/pkg/utils"
 	ovirtsdk "github.com/ovirt/go-ovirt"
 
 	"golang.org/x/net/context"
@@ -29,6 +30,7 @@ type NodeService struct {
 
 var NodeCaps = []csi.NodeServiceCapability_RPC_Type{
 	csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
+	csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
 	csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
 }
 
@@ -159,8 +161,68 @@ func (n *NodeService) publishBlockVolume(req *csi.NodePublishVolumeRequest, devi
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-func (n *NodeService) NodeGetVolumeStats(context.Context, *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
-	panic("implement me")
+func (n *NodeService) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
+	if len(req.VolumeId) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "NodeGetVolumeStats volume ID was empty")
+	}
+
+	if len(req.VolumePath) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "NodeGetVolumeStats volume path was empty")
+	}
+
+	_, err := os.Lstat(req.VolumePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, status.Errorf(codes.NotFound, "Path %s does not exist", req.VolumePath)
+		}
+		return nil, status.Errorf(codes.Internal, "Unknown error when getting stats on %s: %v", req.VolumePath, err)
+	}
+
+	isBlock, err := volumemanager.IsBlockDevice(req.VolumePath)
+
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Failed to determine whether %s is block device: %v", req.VolumePath, err)
+	}
+
+	// If volume is a block device, return only size in bytes.
+	if isBlock {
+		bcap, err := volumemanager.GetBlockSizeBytes(req.VolumePath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "Failed to get block size on path %s: %v", req.VolumePath, err)
+		}
+		return &csi.NodeGetVolumeStatsResponse{
+			Usage: []*csi.VolumeUsage{
+				{
+					Unit:  csi.VolumeUsage_BYTES,
+					Total: bcap,
+				},
+			},
+		}, nil
+	}
+
+	// We assume filesystem presence on volume as raw block device is ruled out and try to get fs stats
+	available, capacity, used, inodesFree, inodes, inodesUsed, err := volumemanager.StatFS(req.VolumePath)
+
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to get fs info on path %s: %v", req.VolumePath, err)
+	}
+
+	return &csi.NodeGetVolumeStatsResponse{
+		Usage: []*csi.VolumeUsage{
+			{
+				Unit:      csi.VolumeUsage_BYTES,
+				Available: available,
+				Total:     capacity,
+				Used:      used,
+			},
+			{
+				Unit:      csi.VolumeUsage_INODES,
+				Available: inodesFree,
+				Total:     inodes,
+				Used:      inodesUsed,
+			},
+		},
+	}, nil
 }
 
 func (n *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
