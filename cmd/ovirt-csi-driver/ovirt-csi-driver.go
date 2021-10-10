@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	configv1 "github.com/openshift/api/config/v1"
 	"math/rand"
 	"os"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
@@ -63,9 +62,6 @@ func handle() {
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := manager.New(restConfig, opts)
 	if err != nil {
-		klog.Fatal(err)
-	}
-	if err := configv1.Install(mgr.GetScheme()); err != nil {
 		klog.Fatal(err)
 	}
 	go func() {

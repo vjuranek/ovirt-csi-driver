@@ -3,10 +3,7 @@ package service
 import (
 	"fmt"
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/ovirt/csi-driver/internal/ovirt"
-	ovirtsdk "github.com/ovirt/go-ovirt"
-	"github.com/pkg/errors"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"strconv"
 
 	"golang.org/x/net/context"
@@ -24,7 +21,7 @@ const (
 
 //ControllerService implements the controller interface
 type ControllerService struct {
-	ovirtClient *ovirt.Client
+	ovirtClient ovirtclient.Client
 	client      client.Client
 }
 
@@ -37,8 +34,8 @@ var ControllerCaps = []csi.ControllerServiceCapability_RPC_Type{
 //CreateVolume creates the disk for the request, unattached from any VM
 func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	klog.Infof("Creating disk %s", req.Name)
-	storageDomain := req.Parameters[ParameterStorageDomainName]
-	if len(storageDomain) == 0 {
+	storageDomainName := req.Parameters[ParameterStorageDomainName]
+	if len(storageDomainName) == 0 {
 		return nil, fmt.Errorf("error required storageClass paramater %s wasn't set",
 			ParameterStorageDomainName)
 	}
@@ -56,210 +53,197 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 			"failed to parse storage class field %s, expected 'true' or 'false' but got %s",
 			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
 	}
-	// idempotence first - see if disk already exists, ovirt creates disk by name(alias in ovirt as well)
-	conn, err := c.ovirtClient.GetConnection()
+	requiredSize := req.CapacityRange.GetRequiredBytes()
+	// Check if a disk with the same name already exist
+	disks, err := c.ovirtClient.ListDisksByAlias(diskName, ovirtclient.ContextStrategy(ctx))
 	if err != nil {
-		klog.Errorf("Failed to get ovirt client connection")
-		return nil, err
-	}
-
-	disk, err := getDiskByName(conn, diskName)
-	if err != nil {
-		msg := fmt.Errorf("failed finding disk %s by name, error: %w", diskName, err)
+		msg := fmt.Errorf("error while finding disk %s by name, error: %w", diskName, err)
 		klog.Errorf(msg.Error())
 		return nil, msg
 	}
-	// if disk doesn't already exist then create it
-	if disk == nil {
-		provisionedSize := req.CapacityRange.GetRequiredBytes()
-		if provisionedSize < minimumDiskSize {
-			provisionedSize = minimumDiskSize
-		}
-
-		imageFormat, err := handleCreateVolumeImageFormat(conn, storageDomain, thinProvisioning)
-		if err != nil {
-			msg := fmt.Errorf("error while choosing image format, error is %w", err)
-			klog.Errorf(msg.Error())
-			return nil, msg
-		}
-
-		// creating the disk
-		disk, err = ovirtsdk.NewDiskBuilder().
-			Name(diskName).
-			StorageDomainsBuilderOfAny(*ovirtsdk.NewStorageDomainBuilder().Name(storageDomain)).
-			ProvisionedSize(provisionedSize).
-			ReadOnly(false).
-			Format(imageFormat).
-			Sparse(thinProvisioning).
-			Build()
-		if err != nil {
-			// failed to construct the disk
-			return nil, fmt.Errorf("failed building disk resource, error is %w", err)
-		}
-		correlationID := fmt.Sprintf("create_disk_%s", utilrand.String(5))
-		createDisk, err := conn.SystemService().DisksService().
-			Add().
-			Disk(disk).
-			Query("correlation_id", correlationID).
-			Send()
-		if err != nil {
-			msg := fmt.Errorf("failed creating disk %s error is %w", diskName, err)
-			klog.Errorf(msg.Error())
-			return nil, msg
-		}
-		disk = createDisk.MustDisk()
-		finished, err := checkJobFinished(ctx, conn, correlationID)
-		if err != nil {
-			msg := fmt.Errorf("error while waiting for disk %s create job to finish, error: %w",
-				disk.MustId(), err)
-			klog.Errorf(msg.Error())
-			return nil, msg
-		}
-		if !finished {
-			msg := fmt.Errorf("create disk %s job didn't finish, error: %w", disk.MustId(), err)
-			klog.Errorf(msg.Error())
-			return nil, msg
-		}
-	}
-	if err = waitForDiskStatusOk(ctx, conn, disk.MustId()); err != nil {
-		msg := fmt.Errorf("failed waiting for disk %s to be created, error: %w",
-			disk.MustId(), err)
+	if len(disks) > 1 {
+		msg := fmt.Errorf(
+			"found more then one disk with the name %s,"+
+				"please contanct the oVirt admin to check the name duplication", diskName)
 		klog.Errorf(msg.Error())
 		return nil, msg
 	}
-	klog.Infof("Finished creating disk %s", diskName)
+	var disk ovirtclient.Disk
+	// If disk doesn't already exist then create it
+	if len(disks) == 0 {
+		disk, err = c.createDisk(ctx, diskName, storageDomainName, requiredSize, thinProvisioning)
+		if err != nil {
+			klog.Errorf(err.Error())
+			return nil, err
+		}
+	} else {
+		disk = disks[0]
+	}
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			CapacityBytes: disk.MustProvisionedSize(),
-			VolumeId:      disk.MustId(),
+			CapacityBytes: int64(disk.ProvisionedSize()),
+			VolumeId:      disk.ID(),
 		},
 	}, nil
 }
 
-func handleCreateVolumeImageFormat(conn *ovirtsdk.Connection, storageDomainName string, thinProvisioning bool) (ovirtsdk.DiskFormat, error) {
-	sd, err := getStorageDomainByName(conn, storageDomainName)
+func (c *ControllerService) createDisk(
+	ctx context.Context, diskName string, storageDomainName string,
+	size int64, thinProvisioning bool) (ovirtclient.Disk, error) {
+	var err error
+	params := ovirtclient.CreateDiskParams()
+	params, err = params.WithSparse(thinProvisioning)
 	if err != nil {
-		return "", fmt.Errorf(
-			"failed searching for storage domain with name %s, error: %w", storageDomainName, err)
+		return nil, err
+	}
+	params, err = params.WithAlias(diskName)
+	if err != nil {
+		return nil, err
+	}
+
+	provisionedSize := size
+	if provisionedSize < minimumDiskSize {
+		provisionedSize = minimumDiskSize
+	}
+
+	sd, err := getStorageDomainByName(ctx, c.ovirtClient, storageDomainName)
+	if err != nil {
+		return nil, fmt.Errorf("failed searching for storage domain with name %s, error: %w", storageDomainName, err)
 	}
 	if sd == nil {
-		return "", fmt.Errorf(
-			"storage domain with name %s wasn't found", storageDomainName)
+		return nil, fmt.Errorf("failed searching for storage domain with name %s, error: %w", storageDomainName, err)
 	}
-	storage, ok := sd.Storage()
-	if !ok {
-		return "", fmt.Errorf(
-			"storage domain with name %s didn't have host storage, verify it is connected to a host",
-			storageDomainName)
+	imageFormat := handleCreateVolumeImageFormat(sd.StorageType(), thinProvisioning)
+
+	disk, err := c.ovirtClient.CreateDisk(
+		sd.ID(),
+		imageFormat,
+		uint64(provisionedSize),
+		params,
+		ovirtclient.ContextStrategy(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("creating oVirt disk %s, error: %w", diskName, err)
 	}
-	storageType, ok := storage.Type()
-	if !ok {
-		return "", fmt.Errorf(
-			"storage domain with name %s didn't have a storage type, please check storage domain on ovirt engine",
-			storageDomainName)
-	}
+	klog.Infof("Finished creating disk %s", diskName)
+	return disk, nil
+
+}
+
+func handleCreateVolumeImageFormat(
+	storageType ovirtclient.StorageDomainType,
+	thinProvisioning bool) ovirtclient.ImageFormat {
 	// Use COW diskformat only when thin provisioning is requested and storage domain
 	// is a non file storage type (for example ISCSI)
 	if !isFileDomain(storageType) && thinProvisioning {
-		return ovirtsdk.DISKFORMAT_COW, nil
+		return ovirtclient.ImageFormatCow
 	} else {
-		return ovirtsdk.DISKFORMAT_RAW, nil
+		return ovirtclient.ImageFormatRaw
 	}
 }
 
 //DeleteVolume removed the disk from oVirt
 func (c *ControllerService) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	klog.Infof("Removing disk %s", req.VolumeId)
+	vId := req.VolumeId
+	if len(vId) == 0 {
+		return nil, fmt.Errorf("error required paramater VolumeId wasn't set")
+	}
+	klog.Infof("Removing disk %s", vId)
+
 	// idempotence first - see if disk already exists, ovirt creates disk by name(alias in ovirt as well)
-	conn, err := c.ovirtClient.GetConnection()
+	// Check if a disk with the same name already exist
+	_, err := c.ovirtClient.GetDisk(vId, ovirtclient.ContextStrategy(ctx))
 	if err != nil {
-		klog.Errorf("Failed to get ovirt client connection")
-		return nil, err
+		if isNotFound(err) {
+			// if disk doesn't exist we're done
+			return &csi.DeleteVolumeResponse{}, nil
+		}
+		msg := fmt.Errorf("error while finding disk %s by id, error: %w", vId, err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
 
-	diskService := conn.SystemService().DisksService().DiskService(req.VolumeId)
-
-	_, err = diskService.Get().Send()
-	// if doesn't exists we're done
+	err = c.ovirtClient.RemoveDisk(vId, ovirtclient.ContextStrategy(ctx))
 	if err != nil {
-		return &csi.DeleteVolumeResponse{}, nil
+		msg := fmt.Errorf("failed removing disk %s by id, error: %w", vId, err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
-	_, err = diskService.Remove().Send()
-	if err != nil {
-		return nil, err
-	}
-
-	klog.Infof("Finished removing disk %s", req.VolumeId)
+	klog.Infof("Finished removing disk %s", vId)
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
 // ControllerPublishVolume takes a volume, which is an oVirt disk, and attaches it to a node, which is an oVirt VM.
 func (c *ControllerService) ControllerPublishVolume(
 	ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-
-	klog.Infof("Attaching Disk %s to VM %s", req.VolumeId, req.NodeId)
-	conn, err := c.ovirtClient.GetConnection()
-	if err != nil {
-		klog.Errorf("Failed to get ovirt client connection")
-		return nil, err
+	vId := req.VolumeId
+	if len(vId) == 0 {
+		return nil, fmt.Errorf("error required request paramater VolumeId wasn't set")
 	}
-
-	da, err := diskAttachmentByVmAndDisk(conn, req.NodeId, req.VolumeId)
+	nId := req.NodeId
+	if len(nId) == 0 {
+		return nil, fmt.Errorf("error required request paramater NodeId wasn't set")
+	}
+	klog.Infof("Attaching Disk %s to VM %s", vId, nId)
+	da, err := diskAttachmentByVmAndDisk(ctx, c.ovirtClient, nId, vId)
 	if err != nil {
-		klog.Error(err)
-		return nil, errors.Wrap(err, "failed finding disk attachments")
+		msg := fmt.Errorf("failed finding disk attachment, error: %w", err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
 	if da != nil {
-		klog.Infof("Disk %s is already attached to VM %s, returning OK", req.VolumeId, req.NodeId)
+		klog.Infof("Disk %s is already attached to VM %s, returning OK", vId, nId)
 		return &csi.ControllerPublishVolumeResponse{}, nil
 	}
-
-	vmService := conn.SystemService().VmsService().VmService(req.NodeId)
-
-	attachmentBuilder := ovirtsdk.NewDiskAttachmentBuilder().
-		DiskBuilder(ovirtsdk.NewDiskBuilder().Id(req.VolumeId)).
-		Interface(ovirtsdk.DISKINTERFACE_VIRTIO_SCSI).
-		Bootable(false).
-		Active(true)
-
-	_, err = vmService.
-		DiskAttachmentsService().
-		Add().
-		Attachment(attachmentBuilder.MustBuild()).
-		Send()
+	params := ovirtclient.CreateDiskAttachmentParams()
+	params, err = params.WithActive(true)
 	if err != nil {
 		return nil, err
 	}
-	klog.Infof("Attached Disk %v to VM %s", req.VolumeId, req.NodeId)
+	params, err = params.WithBootable(false)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.ovirtClient.CreateDiskAttachment(
+		nId,
+		vId,
+		ovirtclient.DiskInterfaceVirtIOSCSI,
+		params,
+		ovirtclient.ContextStrategy(ctx))
+	if err != nil {
+		msg := fmt.Errorf("failed creating disk attachment, error: %w", err)
+		klog.Errorf(msg.Error())
+		return nil, msg
+	}
+	klog.Infof("Attached Disk %v to VM %s", vId, nId)
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
 //ControllerUnpublishVolume detaches the disk from the VM.
-func (c *ControllerService) ControllerUnpublishVolume(_ context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-	klog.Infof("Detaching Disk %s from VM %s", req.VolumeId, req.NodeId)
-	conn, err := c.ovirtClient.GetConnection()
-	if err != nil {
-		klog.Errorf("Failed to get ovirt client connection")
-		return nil, err
+func (c *ControllerService) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	vId := req.VolumeId
+	if len(vId) == 0 {
+		return nil, fmt.Errorf("error required request paramater VolumeId wasn't set")
 	}
-
-	attachment, err := diskAttachmentByVmAndDisk(conn, req.NodeId, req.VolumeId)
+	nId := req.NodeId
+	if len(nId) == 0 {
+		return nil, fmt.Errorf("error required request paramater NodeId wasn't set")
+	}
+	klog.Infof("Detaching Disk %s from VM %s", vId, nId)
+	attachment, err := diskAttachmentByVmAndDisk(ctx, c.ovirtClient, nId, vId)
 	if err != nil {
-		klog.Error(err)
-		return nil, errors.Wrap(err, "failed finding disk attachments")
+		msg := fmt.Errorf("failed finding disk attachment, error: %w", err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
 	if attachment == nil {
-		klog.Infof("Disk attachment %s for VM %s already detached, returning OK", req.VolumeId, req.NodeId)
+		klog.Infof("Disk attachment %s for VM %s already detached, returning OK", vId, nId)
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
-	_, err = conn.SystemService().VmsService().VmService(req.NodeId).
-		DiskAttachmentsService().
-		AttachmentService(attachment.MustId()).
-		Remove().
-		Send()
-
+	err = c.ovirtClient.RemoveDiskAttachment(nId, attachment.ID(), ovirtclient.ContextStrategy(ctx))
 	if err != nil {
-		return nil, err
+		msg := fmt.Errorf("failed removing disk attachment %s, error: %w", attachment.ID(), err)
+		klog.Errorf(msg.Error())
+		return nil, msg
 	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
@@ -307,28 +291,20 @@ func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi
 	newSize := capRange.GetRequiredBytes()
 
 	klog.Infof("Expanding volume %v to %v bytes.", volumeID, newSize)
-	conn, err := c.ovirtClient.GetConnection()
+	disk, err := c.ovirtClient.GetDisk(volumeID, ovirtclient.ContextStrategy(ctx))
 	if err != nil {
-		msg := fmt.Errorf("failed to get ovirt client connection %w", err)
-		klog.Error(msg)
-		return nil, status.Error(codes.Unavailable, msg.Error())
-	}
-
-	diskResp, err := conn.SystemService().DisksService().DiskService(volumeID).Get().Send()
-	if err != nil {
-		msg := fmt.Errorf("failed to find disk %s, error %w", volumeID, err)
+		if isNotFound(err) {
+			msg := fmt.Errorf("disk %s wasn't found", volumeID)
+			klog.Error(msg)
+			return nil, status.Error(codes.NotFound, msg.Error())
+		}
+		msg := fmt.Errorf("error while finding disk %s, error: %w", volumeID, err)
 		klog.Error(msg)
 		return nil, status.Error(codes.Internal, msg.Error())
 	}
-	disk, ok := diskResp.Disk()
-	if !ok {
-		msg := fmt.Errorf("disk %s wasn't found", volumeID)
-		klog.Error(msg)
-		return nil, status.Error(codes.NotFound, msg.Error())
-	}
 	// According to the CSI spec, if the volume is already larger than or equal to the target capacity of
 	// the expansion request, the plugin SHOULD reply 0 OK.
-	diskSize := disk.MustTotalSize()
+	diskSize := int64(disk.TotalSize())
 	if diskSize >= newSize {
 		klog.Infof("Volume %s of size %s is larger than requested size %s, no need to extend",
 			volumeID, newSize)
@@ -336,12 +312,19 @@ func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi
 			CapacityBytes:         diskSize,
 			NodeExpansionRequired: false}, nil
 	}
-	if err = expandDisk(ctx, conn, disk, newSize); err != nil {
-		return nil, status.Errorf(codes.ResourceExhausted, "Failed to expand volume %s: %v", volumeID, err)
+
+	params := ovirtclient.UpdateDiskParams()
+	params, err = params.WithProvisionedSize(uint64(newSize))
+	if err != nil {
+		return nil, err
+	}
+	disk, err = c.ovirtClient.UpdateDisk(volumeID, params, ovirtclient.ContextStrategy(ctx))
+	if err != nil {
+		return nil, status.Errorf(codes.ResourceExhausted, "failed to expand volume %s: %v", volumeID, err)
 	}
 	klog.Infof("Expanded Disk %v to %v bytes", volumeID, newSize)
-	nodeExpansionRequired, err := isNodeExpansionRequired(ctx, c.client, conn, req.GetVolumeCapability(), volumeID)
-	if err = expandDisk(ctx, conn, disk, newSize); err != nil {
+	nodeExpansionRequired, err := c.isNodeExpansionRequired(ctx, req.GetVolumeCapability(), volumeID)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed checking if node expansion is required", volumeID, err)
 	}
 	return &csi.ControllerExpandVolumeResponse{
@@ -349,13 +332,13 @@ func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi
 		NodeExpansionRequired: nodeExpansionRequired}, nil
 }
 
-func isNodeExpansionRequired(ctx context.Context, c client.Client, conn *ovirtsdk.Connection, vc *csi.VolumeCapability, volumeID string) (bool, error) {
+func (c *ControllerService) isNodeExpansionRequired(ctx context.Context, vc *csi.VolumeCapability, volumeID string) (bool, error) {
 	// If this is a raw block device, no expansion should be necessary on the node
 	if vc != nil && vc.GetBlock() != nil {
 		return false, nil
 	}
 	// If disk is not attached to any VM then no need to expand
-	diskAttachment, err := findDiskAttachmentByDiskInCluster(ctx, c, conn, volumeID)
+	diskAttachment, err := findDiskAttachmentByDiskInCluster(ctx, c.ovirtClient, volumeID)
 	if err != nil {
 		return false, fmt.Errorf("error while searching disk attachment for volume %s, error %w",
 			volumeID, err)
