@@ -3,7 +3,7 @@ package service
 import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/ptypes/wrappers"
-	"github.com/ovirt/csi-driver/internal/ovirt"
+	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -12,7 +12,7 @@ import (
 
 //IdentityService of ovirt-csi-driver
 type IdentityService struct {
-	ovirtClient *ovirt.Client
+	ovirtClient ovirtclient.Client
 }
 
 //GetPluginInfo returns the vendor name and version - set in build time
@@ -47,7 +47,7 @@ func (i *IdentityService) GetPluginCapabilities(context.Context, *csi.GetPluginC
 
 // Probe checks the state of the connection to ovirt-engine
 func (i *IdentityService) Probe(_ context.Context, _ *csi.ProbeRequest) (*csi.ProbeResponse, error) {
-	_, err := i.ovirtClient.GetConnection()
+	err := i.ovirtClient.Test()
 	if err != nil {
 		klog.Errorf("Could not get connection %v", err)
 		return nil, status.Error(codes.FailedPrecondition, "Could not get connection to ovirt-engine")
