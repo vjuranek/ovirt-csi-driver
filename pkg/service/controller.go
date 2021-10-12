@@ -2,10 +2,10 @@ package service
 
 import (
 	"fmt"
-	"github.com/container-storage-interface/spec/lib/go/csi"
-	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"strconv"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

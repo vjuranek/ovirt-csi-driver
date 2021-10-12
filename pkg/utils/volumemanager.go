@@ -13,18 +13,18 @@ func StatFS(path string) (available, capacity, used, inodesFree, inodes, inodesU
 	statfs := &unix.Statfs_t{}
 	err = unix.Statfs(path, statfs)
 	if err != nil {
-		err = fmt.Errorf("Failed to get fs info on path %s: %v", path, err)
+		err = fmt.Errorf("failed to get fs info on path %s: %v", path, err)
 		return
 	}
 
 	// Available is blocks available * fragment size
-	available = int64(statfs.Bavail) * int64(statfs.Bsize)
+	available = int64(statfs.Bavail) * statfs.Bsize
 
 	// Capacity is total block count * fragment size
-	capacity = int64(statfs.Blocks) * int64(statfs.Bsize)
+	capacity = int64(statfs.Blocks) * statfs.Bsize
 
 	// Usage is block being used * fragment size (aka block size).
-	used = (int64(statfs.Blocks) - int64(statfs.Bfree)) * int64(statfs.Bsize)
+	used = (int64(statfs.Blocks) - int64(statfs.Bfree)) * statfs.Bsize
 
 	// Get inode usage
 	inodes = int64(statfs.Files)
@@ -49,14 +49,14 @@ func GetBlockSizeBytes(devicePath string) (int64, error) {
 	out, err := cmd.Output()
 
 	if err != nil {
-		return -1, fmt.Errorf("Error when getting size of block volume at path %s: output: %s, err: %v", devicePath, string(out), err)
+		return -1, fmt.Errorf("error when getting size of block volume at path %s: output: %s, err: %v", devicePath, string(out), err)
 	}
 
 	strOut := strings.TrimSpace(string(out))
 	gotSizeBytes, err := strconv.ParseInt(strOut, 10, 64)
 
 	if err != nil {
-		return -1, fmt.Errorf("Failed to parse %s into an int size", strOut)
+		return -1, fmt.Errorf("failed to parse %s into an int size", strOut)
 	}
 
 	return gotSizeBytes, nil

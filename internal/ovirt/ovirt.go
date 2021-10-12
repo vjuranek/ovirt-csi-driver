@@ -1,12 +1,13 @@
 package ovirt
 
 import (
-	ovirtclient "github.com/ovirt/go-ovirt-client"
-	kloglogger "github.com/ovirt/go-ovirt-client-log-klog"
-	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+
+	ovirtclient "github.com/ovirt/go-ovirt-client"
+	kloglogger "github.com/ovirt/go-ovirt-client-log-klog"
+	"gopkg.in/yaml.v2"
 )
 
 const defaultOvirtConfigEnvVar = "OVIRT_CONFIG"

@@ -5,17 +5,16 @@ import (
 	"flag"
 	"math/rand"
 	"os"
-	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"time"
 
 	"github.com/ovirt/csi-driver/internal/ovirt"
+	"github.com/ovirt/csi-driver/pkg/service"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-
-	"github.com/ovirt/csi-driver/pkg/service"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 var (

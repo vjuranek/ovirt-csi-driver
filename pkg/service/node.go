@@ -5,21 +5,19 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"k8s.io/utils/mount"
-
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	volumemanager "github.com/ovirt/csi-driver/pkg/utils"
-
+	ovirtclient "github.com/ovirt/go-ovirt-client"
 	"golang.org/x/net/context"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/klog"
+	"k8s.io/utils/mount"
 )
 
 type NodeService struct {
