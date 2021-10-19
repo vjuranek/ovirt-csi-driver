@@ -3,20 +3,18 @@ package main
 import (
 	"context"
 	"flag"
-	configv1 "github.com/openshift/api/config/v1"
 	"math/rand"
 	"os"
-	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"time"
 
 	"github.com/ovirt/csi-driver/internal/ovirt"
+	"github.com/ovirt/csi-driver/pkg/service"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-
-	"github.com/ovirt/csi-driver/pkg/service"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 var (
@@ -63,9 +61,6 @@ func handle() {
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := manager.New(restConfig, opts)
 	if err != nil {
-		klog.Fatal(err)
-	}
-	if err := configv1.Install(mgr.GetScheme()); err != nil {
 		klog.Fatal(err)
 	}
 	go func() {

@@ -8,22 +8,21 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-csi/csi-lib-utils/protosanitizer"
 	"google.golang.org/grpc"
 	"k8s.io/klog"
-
-	csi "github.com/container-storage-interface/spec/lib/go/csi"
 )
 
-// Defines Non blocking GRPC server interfaces
+// NonBlockingGRPCServer defines Non blocking GRPC server interfaces
 type NonBlockingGRPCServer interface {
 	// Start services at the endpoint
 	Start(endpoint string, ids csi.IdentityServer, cs csi.ControllerServer, ns csi.NodeServer)
-	// Waits for the service to stop
+	// Wait for the service to stop
 	Wait()
-	// Stops the service gracefully
+	// Stop stops the service gracefully
 	Stop()
-	// Stops the service forcefully
+	// ForceStop stops the service forcefully
 	ForceStop()
 }
 
