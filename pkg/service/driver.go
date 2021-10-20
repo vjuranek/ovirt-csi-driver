@@ -22,13 +22,12 @@ type OvirtCSIDriver struct {
 }
 
 // NewOvirtCSIDriver creates a driver instance
-func NewOvirtCSIDriver(ovirtClient ovirtclient.Client, client client.Client, nodeId string) *OvirtCSIDriver {
+func NewOvirtCSIDriver(ovirtClient ovirtclient.Client, nodeId string) *OvirtCSIDriver {
 	d := OvirtCSIDriver{
 		IdentityService:   &IdentityService{ovirtClient},
-		ControllerService: &ControllerService{ovirtClient: ovirtClient, client: client},
+		ControllerService: &ControllerService{ovirtClient: ovirtClient},
 		NodeService:       &NodeService{nodeId: nodeId, ovirtClient: ovirtClient},
 		ovirtClient:       ovirtClient,
-		Client:            client,
 	}
 	return &d
 }
