@@ -10,7 +10,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -22,7 +21,6 @@ const (
 //ControllerService implements the controller interface
 type ControllerService struct {
 	ovirtClient ovirtclient.Client
-	client      client.Client
 }
 
 var ControllerCaps = []csi.ControllerServiceCapability_RPC_Type{
@@ -306,8 +304,8 @@ func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi
 	// the expansion request, the plugin SHOULD reply 0 OK.
 	diskSize := int64(disk.TotalSize())
 	if diskSize >= newSize {
-		klog.Infof("Volume %s of size %s is larger than requested size %s, no need to extend",
-			volumeID, newSize)
+		klog.Infof("Volume %s of size %d is larger than requested size %d, no need to extend",
+			volumeID, diskSize, newSize)
 		return &csi.ControllerExpandVolumeResponse{
 			CapacityBytes:         diskSize,
 			NodeExpansionRequired: false}, nil
@@ -325,7 +323,7 @@ func (c *ControllerService) ControllerExpandVolume(ctx context.Context, req *csi
 	klog.Infof("Expanded Disk %v to %v bytes", volumeID, newSize)
 	nodeExpansionRequired, err := c.isNodeExpansionRequired(ctx, req.GetVolumeCapability(), volumeID)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed checking if node expansion is required", volumeID, err)
+		return nil, status.Errorf(codes.Internal, "failed checking if node expansion is required for volume %s (%v)", volumeID, err)
 	}
 	return &csi.ControllerExpandVolumeResponse{
 		CapacityBytes:         newSize,

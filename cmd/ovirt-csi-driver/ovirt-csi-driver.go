@@ -86,7 +86,7 @@ func handle() {
 		nodeId = get.Status.NodeInfo.SystemUUID
 	}
 
-	driver := service.NewOvirtCSIDriver(ovirtClient, mgr.GetClient(), nodeId)
+	driver := service.NewOvirtCSIDriver(ovirtClient, nodeId)
 
 	driver.Run(*endpoint)
 }
