@@ -33,6 +33,41 @@ func TestVolumeCreation(t *testing.T) {
 	}
 }
 
+func TestDeleteVolume(t *testing.T) {
+	helper := getMockHelper(t)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
+	createVolumeResponse, err := createTestVolume(helper, controller)
+	if err != nil {
+		t.Fatalf("failed to create test volume (%v)", err)
+	}
+
+	_, err = controller.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: createVolumeResponse.Volume.VolumeId,
+	})
+	if err != nil {
+		t.Fatalf("failed to delete volume (%v)", err)
+	}
+	diskList, err := helper.GetClient().ListDisks()
+	if err != nil {
+		t.Fatalf("failed to list disks (%v)", err)
+	}
+	if len(diskList) != 0 {
+		t.Fatalf("disk wasn't deleted, number of disks on backend: %d", len(diskList))
+	}
+}
+
+func TestDeleteNonExistentVolume(t *testing.T) {
+	helper := getMockHelper(t)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
+
+	_, err := controller.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: "doesn't exists",
+	})
+	if err != nil {
+		t.Fatalf("deleting volume which doesn't exist failed (%v)", err)
+	}
+}
+
 func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCSIDriver) (*csi.CreateVolumeResponse, error) {
 	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
 	if err != nil {
