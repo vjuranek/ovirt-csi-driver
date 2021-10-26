@@ -68,6 +68,80 @@ func TestDeleteNonExistentVolume(t *testing.T) {
 	}
 }
 
+func TestControllerPublishVolume(t *testing.T) {
+	helper := getMockHelper(t)
+	publishRequest := &csi.ControllerPublishVolumeRequest{
+		VolumeId: "",
+		NodeId:   "",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{
+					FsType: "ext4",
+				},
+			},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+		Readonly: true,
+	}
+	vmId, diskId, err := publishTestVolume(helper, publishRequest)
+	if err != nil {
+		t.Fatalf("failed to publish the volume (%v)", err)
+	}
+
+	attachments, err := helper.GetClient().ListDiskAttachments(vmId, ovirtclient.ContextStrategy(context.Background()))
+	if err != nil {
+		t.Fatalf("failed to list disk attachments (%v)", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("incorrect number of disk attachmanets (%d)", len(attachments))
+	}
+	attachment := attachments[0]
+	if attachment.DiskID() != diskId {
+		t.Fatalf("incorrect disk ID: %s", attachment.DiskID())
+	}
+	disk, err := attachment.Disk()
+	if err != nil {
+		t.Fatalf("failed to get disk (%v)", err)
+	}
+	if disk.TotalSize() < 4096 {
+		t.Fatalf("incorrect disk size on the backend: %d", disk.TotalSize())
+	}
+}
+
+func TestControllerPublishVolumeTwice(t *testing.T) {
+	helper := getMockHelper(t)
+
+	publishRequest := &csi.ControllerPublishVolumeRequest{
+		VolumeId: "",
+		NodeId:   "",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{
+					FsType: "ext4",
+				},
+			},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+		Readonly: true,
+	}
+
+	// Publish volume.
+	_, _, err := publishTestVolume(helper, publishRequest)
+	if err != nil {
+		t.Fatalf("failed to publish the volume (%v)", err)
+	}
+
+	// Publish volume again, should succeed.
+	_, _, err = publishTestVolume(helper, publishRequest)
+	if err != nil {
+		t.Fatalf("failed to publish volume which was already published (%v)", err)
+	}
+}
+
 func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCSIDriver) (*csi.CreateVolumeResponse, error) {
 	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
 	if err != nil {
@@ -91,4 +165,32 @@ func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCS
 	}
 
 	return createVolumeResponse, nil
+}
+
+func publishTestVolume(helper ovirtclient.TestHelper, publishReq *csi.ControllerPublishVolumeRequest) (string, string, error) {
+	if publishReq.NodeId == "" {
+		vm, err := helper.GetClient().CreateVM(
+			helper.GetClusterID(),
+			helper.GetBlankTemplateID(),
+			ovirtclient.CreateVMParams().MustWithName("test"))
+		if err != nil {
+			return "", "", err
+		}
+		publishReq.NodeId = vm.ID()
+	}
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), publishReq.NodeId)
+	if publishReq.VolumeId == "" {
+		createVolumeResponse, err := createTestVolume(helper, controller)
+		if err != nil {
+			return "", "", err
+		}
+		publishReq.VolumeId = createVolumeResponse.Volume.VolumeId
+	}
+
+	_, err := controller.ControllerPublishVolume(context.Background(), publishReq)
+	if err != nil {
+		return "", "", err
+	}
+
+	return publishReq.NodeId, publishReq.VolumeId, nil
 }
