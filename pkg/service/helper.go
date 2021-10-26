@@ -74,7 +74,7 @@ func getStorageDomainByName(
 }
 
 func isFileDomain(storageType ovirtclient.StorageDomainType) bool {
-	for _, v := range ovirtclient.StorageDomainTypeValues() {
+	for _, v := range ovirtclient.FileStorageDomainTypeValues() {
 		if storageType == v {
 			return true
 		}
