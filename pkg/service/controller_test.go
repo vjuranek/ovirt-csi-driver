@@ -307,6 +307,19 @@ func TestControllerExpandVolumeToSmallerSize(t *testing.T) {
 	}
 }
 
+func TestControllerGetCapabilities(t *testing.T) {
+	helper := getMockHelper(t)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
+	capsResp, err := controller.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("failed to get controller capabilities (%v)", err)
+	}
+	caps := capsResp.GetCapabilities()
+	assertHasCapability(caps, csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME, t)
+	assertHasCapability(caps, csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME, t)
+	assertHasCapability(caps, csi.ControllerServiceCapability_RPC_EXPAND_VOLUME, t)
+}
+
 func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCSIDriver) (*csi.CreateVolumeResponse, error) {
 	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
 	if err != nil {
@@ -358,4 +371,13 @@ func publishTestVolume(helper ovirtclient.TestHelper, publishReq *csi.Controller
 	}
 
 	return publishReq.NodeId, publishReq.VolumeId, nil
+}
+
+func assertHasCapability(caps []*csi.ControllerServiceCapability, capType csi.ControllerServiceCapability_RPC_Type, t *testing.T) {
+	for _, cap := range caps {
+		if cap.GetRpc().GetType() == capType {
+			return
+		}
+	}
+	t.Fatalf("missing capability: %v", capType)
 }
