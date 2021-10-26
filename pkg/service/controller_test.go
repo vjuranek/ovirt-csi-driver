@@ -142,6 +142,91 @@ func TestControllerPublishVolumeTwice(t *testing.T) {
 	}
 }
 
+func TestControllerUnpublishVolume(t *testing.T) {
+	helper := getMockHelper(t)
+	publishRequest := &csi.ControllerPublishVolumeRequest{
+		VolumeId: "",
+		NodeId:   "",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{
+					FsType: "ext4",
+				},
+			},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+		Readonly: true,
+	}
+	vmId, diskId, err := publishTestVolume(helper, publishRequest)
+	if err != nil {
+		t.Fatalf("failed to publish the volume (%v)", err)
+	}
+
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), vmId)
+	_, err = controller.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{
+		VolumeId: diskId,
+		NodeId:   vmId,
+	})
+	if err != nil {
+		t.Fatalf("failed to unpublish the volume (%v)", err)
+	}
+
+	attachments, err := helper.GetClient().ListDiskAttachments(vmId, ovirtclient.ContextStrategy(context.Background()))
+	if err != nil {
+		t.Fatalf("failed to list disk attachments (%v)", err)
+	}
+	if len(attachments) != 0 {
+		t.Fatalf("volume is still published")
+	}
+}
+
+func TestControllerUnpublishVolumeTwice(t *testing.T) {
+	helper := getMockHelper(t)
+	publishRequest := &csi.ControllerPublishVolumeRequest{
+		VolumeId: "",
+		NodeId:   "",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{
+					FsType: "ext4",
+				},
+			},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+		Readonly: true,
+	}
+
+	// Publish volume.
+	vmId, diskId, err := publishTestVolume(helper, publishRequest)
+	if err != nil {
+		t.Fatalf("failed to publish the volume (%v)", err)
+	}
+
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), vmId)
+
+	// Unpublish volume.
+	_, err = controller.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{
+		VolumeId: diskId,
+		NodeId:   vmId,
+	})
+	if err != nil {
+		t.Fatalf("failed to unpublish the volume (%v)", err)
+	}
+
+	// Unpublish volume second time, should succeed.
+	_, err = controller.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{
+		VolumeId: diskId,
+		NodeId:   vmId,
+	})
+	if err != nil {
+		t.Fatalf("failed to unpublish volume which was already unpublished (%v)", err)
+	}
+}
+
 func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCSIDriver) (*csi.CreateVolumeResponse, error) {
 	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
 	if err != nil {
