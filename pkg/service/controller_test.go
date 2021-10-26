@@ -227,6 +227,86 @@ func TestControllerUnpublishVolumeTwice(t *testing.T) {
 	}
 }
 
+func TestControllerExpandVolume(t *testing.T) {
+	helper := getMockHelper(t)
+
+	publishRequest := &csi.ControllerPublishVolumeRequest{
+		VolumeId: "",
+		NodeId:   "",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{
+					FsType: "ext4",
+				},
+			},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+		Readonly: true,
+	}
+	nodeId, diskId, err := publishTestVolume(helper, publishRequest)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), nodeId)
+	disk, err := helper.GetClient().GetDisk(diskId)
+	if err != nil {
+		t.Fatalf("failed to get disks (%v)", err)
+	}
+
+	expandedSize := int64(2 * disk.TotalSize())
+	expandResp, err := controller.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
+		VolumeId: diskId,
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: expandedSize,
+			LimitBytes:    expandedSize,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to expand volume (%v)", err)
+	}
+
+	if !expandResp.NodeExpansionRequired {
+		t.Fatalf("node expansion not required (%v)", err)
+	}
+	if expandResp.CapacityBytes < expandedSize {
+		t.Fatalf("volume wasn't expanded (%v)", err)
+	}
+	disk, err = helper.GetClient().GetDisk(diskId)
+	if err != nil {
+		t.Fatalf("failed to get disks (%v)", err)
+	}
+	if disk.TotalSize() < uint64(expandedSize) {
+		t.Fatalf("incorrect disk size on the backend: %d, expanded size: %d", disk.TotalSize(), expandedSize)
+	}
+}
+
+func TestControllerExpandVolumeToSmallerSize(t *testing.T) {
+	helper := getMockHelper(t)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
+
+	createVolumeResponse, err := createTestVolume(helper, controller)
+	if err != nil {
+		t.Fatalf("failed to create test volume (%v)", err)
+	}
+
+	expandResp, err := controller.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
+		VolumeId: createVolumeResponse.Volume.VolumeId,
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: 1024,
+			LimitBytes:    1024,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to expand volume (%v)", err)
+	}
+
+	if expandResp.CapacityBytes < 4096 {
+		t.Fatalf("volume was shrunk, which shouln't be possible (%v)", err)
+	}
+	if expandResp.NodeExpansionRequired {
+		t.Fatalf("node requires expansion, while the request was to shrink the volume (%v)", err)
+	}
+}
+
 func createTestVolume(helper ovirtclient.TestHelper, controller *service.OvirtCSIDriver) (*csi.CreateVolumeResponse, error) {
 	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
 	if err != nil {
