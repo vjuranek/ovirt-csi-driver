@@ -33,6 +33,39 @@ func TestVolumeCreation(t *testing.T) {
 	}
 }
 
+func TestCreateRWXVolumeFails(t *testing.T) {
+	helper := getMockHelper(t)
+	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
+	testStorageDomain, err := helper.GetClient().GetStorageDomain(helper.GetStorageDomainID())
+	if err != nil {
+		t.Fatalf("failed to get stoarge domain %s", helper.GetStorageDomainID())
+	}
+
+	_, err = controller.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "test",
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: 4096,
+			LimitBytes:    4096,
+		},
+		Parameters: map[string]string{
+			"storageClass":      "ovirt-test-domain",
+			"storageDomainName": testStorageDomain.Name(),
+			"thinProvisioning":  "true",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{
+			{
+				AccessMode: &csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+				},
+			},
+		},
+	})
+
+	if err == nil {
+		t.Fatalf("publishing RWX volume which shouldn't be possible")
+	}
+}
+
 func TestDeleteVolume(t *testing.T) {
 	helper := getMockHelper(t)
 	controller := service.NewOvirtCSIDriver(helper.GetClient(), "test")
