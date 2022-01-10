@@ -51,6 +51,13 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 			"failed to parse storage class field %s, expected 'true' or 'false' but got %s",
 			ParameterThinProvisioning, req.Parameters[ParameterThinProvisioning])
 	}
+	// Check access mode
+	for _, cap := range req.GetVolumeCapabilities() {
+		if cap.AccessMode.Mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY &&
+			cap.AccessMode.Mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
+			return nil, fmt.Errorf("unsupported access mode %s, currently only RWO is supported", cap.AccessMode.Mode)
+		}
+	}
 	requiredSize := req.CapacityRange.GetRequiredBytes()
 	// Check if a disk with the same name already exist
 	disks, err := c.ovirtClient.ListDisksByAlias(diskName, ovirtclient.ContextStrategy(ctx))
