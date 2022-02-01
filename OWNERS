@@ -1,8 +1,10 @@
 approvers:
   - janosdebugs
   - eslutsky
+  - mmartinv
 reviewers:
   - janosdebugs
   - eslutsky
+  - mmartinv
 component: "Storage"
 subcomponent: "oVirt CSI Driver"
