@@ -55,7 +55,7 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	for _, cap := range req.GetVolumeCapabilities() {
 		if cap.AccessMode.Mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY &&
 			cap.AccessMode.Mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-			return nil, fmt.Errorf("unsupported access mode %s, currently only RWO is supported", cap.AccessMode.Mode)
+			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("unsupported access mode %s, currently only RWO is supported", cap.AccessMode.Mode))
 		}
 	}
 	requiredSize := req.CapacityRange.GetRequiredBytes()
