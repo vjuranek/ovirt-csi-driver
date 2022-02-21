@@ -46,44 +46,70 @@ func (n *NodeService) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	if vId == "" {
 		return nil, fmt.Errorf("NodeStageVolumeRequest didn't contain required field VolumeId")
 	}
-
 	klog.Infof("Staging volume %s with %+v", vId, req)
 
-	if req.VolumeCapability.GetBlock() != nil {
-		klog.Infof("Volume %s is a block volume, no need for staging", vId)
-		return &csi.NodeStageVolumeResponse{}, nil
-	}
-
+	// get device attached to the node VM
 	device, err := n.getDeviceByAttachmentId(ctx, vId, n.nodeId)
 	if err != nil {
 		klog.Errorf("Failed to fetch device by attachment-id for volume %s on node %s", vId, n.nodeId)
 		return nil, err
 	}
 
-	// is there a filesystem on this device?
-	filesystem, err := getDeviceInfo(device)
-	if err != nil {
-		klog.Errorf("Failed to fetch device info for volume %s on node %s", vId, n.nodeId)
-		return nil, err
-	}
-	if filesystem != "" {
-		klog.Infof("Detected fs %s, returning", filesystem)
-		return &csi.NodeStageVolumeResponse{}, nil
+	isBlockDev := req.VolumeCapability.GetBlock() != nil
+
+	// create FS on the device if it's file device
+	fsType := ""
+	if !isBlockDev {
+		// file based storage
+		// is there a filesystem on this device?
+		err = createFsIfNeeded(req, device)
+		if err != nil {
+			return nil, err
+		}
+		fsType = req.VolumeCapability.GetMount().FsType
+	} else {
+		// block based storage
+		klog.Infof("Volume %s is a block volume, will not create any FS", vId)
 	}
 
-	fsType := req.VolumeCapability.GetMount().FsType
-	// no filesystem - create it
-	klog.Infof("Creating FS %s on device %s", fsType, device)
-	err = makeFS(device, fsType)
+	// create staging path if needed
+	err = createMountDest(req.GetStagingTargetPath(), isBlockDev)
 	if err != nil {
-		klog.Errorf("Could not create filesystem %s on %s", fsType, device)
+		return nil, err
+	}
+
+	// mount volume to the staging path
+	err = mountStagingPath(req, device, fsType)
+	if err != nil {
+		klog.Errorf("Could not mount device %s to staging path %s", device, req.GetStagingTargetPath())
 		return nil, err
 	}
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
-func (n *NodeService) NodeUnstageVolume(_ context.Context, _ *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
+func (n *NodeService) NodeUnstageVolume(_ context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
+	stagingPath := req.GetStagingTargetPath()
+	mounter := mount.New("")
+	notMounted, err := mount.IsNotMountPoint(mounter, stagingPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("error checking if stagingPath %s is mounted: %w", stagingPath, err)
+		}
+		notMounted = true
+	}
+	if notMounted {
+		klog.Infof("stagingPath %s already unmounted", stagingPath)
+		return &csi.NodeUnstageVolumeResponse{}, nil
+	}
+
+	klog.Infof("Unmounting stagingPath %s", stagingPath)
+	err = mounter.Unmount(stagingPath)
+	if err != nil {
+		klog.Infof("Failed to unmount")
+		return nil, err
+	}
+
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
@@ -92,27 +118,38 @@ func (n *NodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if vId == "" {
 		return nil, fmt.Errorf("NodeStageVolumeRequest didn't contain required field VolumeId")
 	}
-	device, err := n.getDeviceByAttachmentId(ctx, vId, n.nodeId)
+
+	isBlockDev := req.VolumeCapability.GetBlock() != nil
+	targetPath := req.GetTargetPath()
+	stagingPath := req.GetStagingTargetPath()
+
+	// if isBlockDev {
+	// 	device, err := n.getDeviceByAttachmentId(ctx, vId, n.nodeId)
+	// 	if err != nil {
+	// 		klog.Errorf("Failed to fetch device by attachment-id for volume %s on node %s", vId, n.nodeId)
+	// 		return nil, err
+	// 	}
+	// 	stagingPath = device
+	// }
+
+	_, err := os.Lstat(stagingPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("staging path %s doesn't exists", stagingPath)
+	}
+
+	err = createMountDest(targetPath, isBlockDev)
 	if err != nil {
-		klog.Errorf("Failed to fetch device by attachment-id for volume %s on node %s", vId, n.nodeId)
 		return nil, err
 	}
 
-	if req.VolumeCapability.GetBlock() != nil {
-		return n.publishBlockVolume(req, device)
+	fsType := ""
+	if !isBlockDev {
+		fsType = req.VolumeCapability.GetMount().FsType
 	}
 
-	targetPath := req.GetTargetPath()
-	err = os.MkdirAll(targetPath, 0644)
-	if err != nil {
-		return nil, errors.New(err.Error())
-	}
-
-	fsType := req.VolumeCapability.GetMount().FsType
-	klog.Infof("Mounting devicePath %s, on targetPath: %s with FS type: %s",
-		device, targetPath, fsType)
+	klog.Infof("Mounting stagingPath %s, on targetPath: %s with FS type: %s", stagingPath, targetPath, fsType)
 	mounter := mount.New("")
-	err = mounter.Mount(device, targetPath, fsType, []string{})
+	err = mounter.Mount(stagingPath, targetPath, fsType, []string{"bind"})
 	if err != nil {
 		klog.Errorf("Failed mounting %v", err)
 		return nil, err
@@ -131,29 +168,6 @@ func (n *NodeService) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubl
 	}
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
-}
-
-func (n *NodeService) publishBlockVolume(req *csi.NodePublishVolumeRequest, device string) (*csi.NodePublishVolumeResponse, error) {
-	klog.Infof("Publishing block volume, device: %s, req: %+v", device, req)
-	file, err := os.OpenFile(req.TargetPath, os.O_CREATE, os.FileMode(0644))
-	defer file.Close()
-	if err != nil {
-		if !os.IsExist(err) {
-			return nil, status.Errorf(codes.Internal, "Failed to create targetPath %s, err: %v", req.TargetPath, err)
-		}
-	}
-
-	mounter := mount.New("")
-	err = mounter.Mount(device, req.TargetPath, "", []string{"bind"})
-	if err != nil {
-		if removeErr := os.Remove(req.TargetPath); removeErr != nil {
-			return nil, status.Errorf(codes.Internal, "Failed to remove mount target %v, err: %v, mount error: %v", req.TargetPath, removeErr, err)
-		}
-
-		return nil, status.Errorf(codes.Internal, "Failed to mount %v at %v, err: %v", device, req.TargetPath, err)
-	}
-
-	return &csi.NodePublishVolumeResponse{}, nil
 }
 
 func (n *NodeService) NodeGetVolumeStats(_ context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
@@ -275,6 +289,72 @@ func (n *NodeService) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilit
 		)
 	}
 	return &csi.NodeGetCapabilitiesResponse{Capabilities: caps}, nil
+}
+
+func mountStagingPath(req *csi.NodeStageVolumeRequest, device string, fsType string) error {
+	stagingPath := req.GetStagingTargetPath()
+	klog.Infof("Mounting devicePath %s, on stagingPath: %s with FS type: %s",
+		device, stagingPath, fsType)
+
+	mountOptions := []string{}
+	if req.VolumeCapability.GetBlock() != nil {
+		mountOptions = []string{"bind"}
+	}
+
+	mounter := mount.New("")
+	err := mounter.Mount(device, stagingPath, fsType, mountOptions)
+	if err != nil {
+		klog.Errorf("Failed mounting %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func createFsIfNeeded(req *csi.NodeStageVolumeRequest, device string) error {
+	filesystem, err := getDeviceInfo(device)
+	if err != nil {
+		klog.Errorf("Failed to fetch device info for device %s on volume %s", device, req.VolumeId)
+		return err
+	}
+
+	if filesystem == "" {
+		// no FS, create it
+		fsType := req.VolumeCapability.GetMount().FsType
+		klog.Infof("Creating FS %s on device %s", fsType, device)
+		err := makeFS(device, fsType)
+		if err != nil {
+			klog.Errorf("Could not create filesystem %s on %s", fsType, device)
+			return err
+		}
+	} else {
+		klog.Infof("Detected fs %s, will not create any FS", filesystem)
+	}
+
+	return nil
+}
+
+func createMountDest(mountDest string, isBlockDevice bool) error {
+	_, err := os.Stat(mountDest)
+	if err == nil {
+		return nil
+	}
+
+	if isBlockDevice {
+		file, err := os.OpenFile(mountDest, os.O_CREATE, os.FileMode(0644))
+		if err != nil {
+			if !os.IsExist(err) {
+				return status.Errorf(codes.Internal, "Failed to create targetPath %s, err: %v", mountDest, err)
+			}
+		}
+		defer file.Close()
+	} else {
+		err := os.MkdirAll(mountDest, 0644)
+		if err != nil {
+			return errors.New(err.Error())
+		}
+	}
+	return nil
 }
 
 func (n *NodeService) getDeviceByAttachmentId(ctx context.Context, volumeID, nodeID string) (string, error) {
